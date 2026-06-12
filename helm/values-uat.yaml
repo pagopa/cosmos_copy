@@ -1,0 +1,111 @@
+microservice-chart:
+  namespace: "receipts"
+  nameOverride: ""
+  fullnameOverride: ""
+  image:
+    repository: ghcr.io/pagopa/pagopa-cosmos-copy
+    tag: "0.0.1"
+    pullPolicy: Always
+  livenessProbe:
+    httpGet:
+      path: /actuator/health/liveness
+      port: 8080
+    initialDelaySeconds: 90
+    failureThreshold: 6
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /actuator/health/readiness
+      port: 8080
+    initialDelaySeconds: 90
+    failureThreshold: 6
+    periodSeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  deployment:
+    create: true
+    replicas: 1 # (default) same as HPA minReplica
+  service:
+    create: true
+    type: ClusterIP
+    ports:
+      - 8080
+  ingress:
+    create: true
+    host: "weudev.receipts.internal.dev.platform.pagopa.it"
+    path: /pagopa-cosmos_copy/(.*)
+    servicePort: 8080
+  serviceAccount:
+    name: 'receipts-workload-identity'
+  azure:
+    workloadIdentityClientId: <workload-identity-client-id-set-automatically-by-gha>
+  podAnnotations: {}
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "0.25"
+    limits:
+      memory: "640Mi"
+      cpu: "0.5"
+  autoscaling:
+    enable: true
+    minReplica: 1
+    maxReplica: 1
+    pollingInterval: 5 # seconds
+    cooldownPeriod: 50 # seconds
+    triggers:
+      - type: cpu
+        metadata:
+          # Required
+          type: Utilization # Allowed types are 'Utilization' or 'AverageValue'
+          value: "50"
+    advanced:
+      horizontalPodAutoscalerConfig:
+        behavior:
+          scaleDown:
+            # https://github.com/kubernetes/enhancements/blob/master/keps/sig-autoscaling/853-configurable-hpa-scale-velocity/README.md#stabilization-window
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Pods
+                value: 1
+                periodSeconds: 20
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Pods
+                value: 2
+                periodSeconds: 20
+  envConfig:
+    ENV: 'dev'
+    COSMOS_DATASOURCE_URL: "https://pagopa-u-weu-receipts-ds-cosmos-account.documents.azure.com:443/"
+    COSMOS_DATASOURCE_NAME: "db"
+    COSMOS_CONTAINER_SOURCE: "receipts"
+    COSMOS_CONTAINER_TARGET: "receipts-pk"
+    COSMOS_CONTAINER_LEASE: "receipts-leases"
+    RETRY_MAX_ATTEMPTS: 5
+    RETRY_BACKOFF: 5
+  envSecret:
+    # required
+    COSMOS_DATASOURCE_KEY: 'cosmos-receipt-pkey'
+  keyvault:
+    name: 'pagopa-d-receipts-kv'
+    tenantId: '7788edaf-0346-4068-9d79-c868aed15b3d'
+  nodeSelector: {}
+  tolerations: []
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node_type
+                operator: In
+                values:
+                  - user

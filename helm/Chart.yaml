@@ -1,0 +1,10 @@
+apiVersion: v2
+name: pagopa-cosmos_copy
+description: Cosmos DB copy microservice for PagoPA
+type: application
+version: 0.1.0
+appVersion: 0.0.1
+dependencies:
+  - name: microservice-chart
+    version: 8.0.2
+    repository: "https://pagopa.github.io/aks-microservice-chart-blueprint"

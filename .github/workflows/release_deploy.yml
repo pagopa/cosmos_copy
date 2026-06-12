@@ -1,0 +1,143 @@
+name: Release And Deploy
+
+# Controls when the workflow will run
+on:
+  pull_request:
+    branches:
+      - main
+    types: [ closed ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Select the Environment
+        options:
+          - dev
+          - uat
+          - prod
+      semver:
+        required: true
+        type: choice
+        description: Select the new Semantic Version
+        options:
+          - major
+          - minor
+          - patch
+          - buildNumber
+          - skip
+        default: skip
+      is_canary:
+        type: boolean
+        description: 'Mark the release as canary on AKS'
+        default: false
+      traffic_weight:
+        required: false
+        type: number
+        default: 0
+        description: 'The percentage of traffic to be sent to the canary version'
+
+permissions:
+  packages: write
+  contents: write
+  issues: write
+  id-token: write
+  actions: read
+
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      semver: ${{ steps.get_semver.outputs.semver }}
+      environment: ${{ steps.output.outputs.environment }}
+    steps:
+      - name: Get semver
+        id: get_semver
+        uses: pagopa/github-actions-template/semver-setup@0018ad6b766a082c35ec88cd9f18de6b54fd59d1 # v1.4.2
+
+      - if: ${{ github.event.inputs.environment == null || github.event.inputs.environment == 'dev' }}
+        run: echo "ENVIRNOMENT=dev" >> $GITHUB_ENV
+
+      - if: ${{ github.event.inputs.environment == 'uat' }}
+        run: echo "ENVIRNOMENT=uat" >> $GITHUB_ENV
+
+      - if: ${{ github.event.inputs.environment == 'prod' }}
+        run: echo "ENVIRNOMENT=prod" >> $GITHUB_ENV
+
+      - if: ${{ github.event.inputs.environment == 'all' }}
+        run: echo "ENVIRNOMENT=all" >> $GITHUB_ENV
+
+      - id: output
+        name: Set Output
+        run: |
+          echo "environment=${{env.ENVIRNOMENT}}" >> $GITHUB_OUTPUT
+
+
+  release:
+    name: Create a New Release
+    runs-on: ubuntu-latest
+    needs: [setup]
+    if: ${{ needs.setup.outputs.semver != 'skip' }}
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Make Release
+        id: release
+        uses: pagopa/github-actions-template/maven-release@38203c7599bcac41a743237ccb17c733ff9c2eee # v1.12.0
+        with:
+          semver: ${{ needs.setup.outputs.semver }}
+          github_token: ${{ secrets.BOT_TOKEN_GITHUB }}
+          beta: ${{ inputs.is_canary }}
+          skip_ci: false
+
+  image:
+    needs: [ setup, release ]
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    if: ${{ inputs.semver != 'skip' }}
+    steps:
+      - name: Build and Push
+        id: semver
+        uses: pagopa/github-actions-template/ghcr-build-push@d91a1fd0b913c9830589be5d86cdb71c90813fae # v1.5.4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.release.outputs.version }}
+
+  deploy_aks:
+    name: Deploy on AKS
+    needs: [ setup, release, image ]
+    if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    uses: ./.github/workflows/deploy_with_github_runner.yml
+    with:
+      environment: ${{ needs.setup.outputs.environment }}
+      suffix_name: ${{ inputs.is_canary && '-canary' || '' }}
+      is_canary: ${{ inputs.is_canary }}
+      traffic_weight: ${{ inputs.traffic_weight }}
+    secrets:
+        CLIENT_ID: ${{ secrets.CLIENT_ID }}
+        TENANT_ID: ${{ secrets.TENANT_ID }}
+        SUBSCRIPTION_ID: ${{ secrets.SUBSCRIPTION_ID }}
+
+  notify:
+    needs: [ setup, release, deploy_aks ]
+    runs-on: ubuntu-latest
+    name: Notify
+    if: always()
+    steps:
+      - name: Report Status
+        if: ${{ needs.setup.outputs.environment == 'prod' }}
+        uses: ravsamhq/notify-slack-action@be814b201e233b2dc673608aa46e5447c8ab13f2 # v2
+        with:
+          status: ${{ needs.deploy_aks.result }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          notification_title: 'New Release on Production ${{ needs.release.outputs.version }} has {status_message}'
+          message_format: '{emoji} <{run_url}|{workflow}> {status_message} in <{repo_url}|{repo}>'
+          footer: 'Linked to <{workflow_url}| workflow file>'
+          icon_success: ':white_check_mark:'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEPLOY }}
